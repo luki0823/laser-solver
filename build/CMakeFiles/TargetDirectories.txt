@@ -1,0 +1,3 @@
+/home/lucas/Documents/Masters/Codes/laser_solver/build/CMakeFiles/laser1d.dir
+/home/lucas/Documents/Masters/Codes/laser_solver/build/CMakeFiles/edit_cache.dir
+/home/lucas/Documents/Masters/Codes/laser_solver/build/CMakeFiles/rebuild_cache.dir
