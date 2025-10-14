@@ -2,6 +2,8 @@
 /build/
 /CMakeFiles/
 /CMakeCache.txt
+/data/
+/out
 cmake_install.cmake
 Makefile
 
@@ -11,8 +13,11 @@ Makefile
 *.app
 
 # Python cache
-__pycache__/
+/__pycache__/
 *.pyc
+
+#data files
+data/out/
 
 # IDE settings
 .vscode/
