@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/laser1d.dir/apps/laser1d.cpp.o -o bin/laser1d 
