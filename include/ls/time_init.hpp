@@ -140,4 +140,109 @@ inline double step_euler(std::vector<State>& U,
     return dt;
 }
 
+
+inline double rk3_step(std::vector<State>& U,
+                       double t,
+                       double gamma,
+                       double dx,
+                       double CFL,
+                       BCKind bc,
+                       const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
+{
+    const double dt = cfl_dt(U,gamma,dx,CFL);
+
+    // -- Stage 1 U1 = U^n + dt * L(U^n, t)
+    std::vector<State> Ln; //L(Un)
+    flux_divergence(U, gamma, dx, bc, Ln);
+    std::vector<State> U1 = U;
+    for (size_t i = 0; i < U.size(); ++i){
+        U1[i] = U1[i] + dt * Ln[i];
+    }
+    if (post_source) post_source(dt, t+dt, U1);
+
+    // Stage 2 3/4 U^n + 1/4 * (U1 + dt * L( U1, t+dt))
+    std::vector<State> L1;
+    flux_divergence(U1, gamma, dx, bc, L1);
+    std::vector<State> U2 = U1;
+
+    for (size_t i = 0; i<U.size(); ++i){
+        State tmp = U1[i] + dt*L1[i];
+        //convex combination
+        U2[i].rho  = 0.75 * U[i].rho  + 0.25 * tmp.rho;
+        U2[i].rhou = 0.75 * U[i].rhou + 0.25 * tmp.rhou;
+        U2[i].E    = 0.75 * U[i].E    + 0.25 * tmp.E;
+
+    }
+    if (post_source) post_source(dt, t + dt, U2);
+
+    // --- Stage 3: U^{n+1} = 1/3 U^n + 2/3 ( U2 + dt * L(U2, t+dt) )
+    std::vector<State> L2;
+    flux_divergence(U2, gamma, dx, bc, L2);
+    for (size_t i = 0; i < U.size(); ++i) {
+        State tmp = U2[i] + dt * L2[i];
+        U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * tmp.rho;
+        U[i].rhou = (1.0/3.0) * U[i].rhou + (2.0/3.0) * tmp.rhou;
+        U[i].E    = (1.0/3.0) * U[i].E    + (2.0/3.0) * tmp.E;
+    }
+    if (post_source) post_source(dt, t + dt, U);
+
+    return dt; // caller advances time by this
+}
+
+inline void advance_ssprk3(std::vector<State>& U,
+                           double& t,
+                           double t_end,
+                           double gamma,
+                           double dx,
+                           double CFL,
+                           BCKind bc,
+                           const std::function<void(double /*dt*/, double /*t*/, const std::vector<State>& /*U*/)> &on_step = nullptr,
+                           const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
+{
+    int step = 0;
+    while (t < t_end) {
+        // compute a dt from current state, but clamp so we don't overshoot t_end
+        double dt_try = cfl_dt(U, gamma, dx, CFL);
+        double dt = std::min(dt_try, t_end - t);
+
+        // perform one RK3 step with *this* dt:
+        // to reuse rk3_step (which computes its own dt), we temporarily set CFL
+        // so that cfl_dt returns exactly dt. Easiest is to call a local lambda.
+        auto rk3_step_fixed_dt = [&](double fixed_dt) {
+            // Stage 1
+            std::vector<State> L0; flux_divergence(U,  gamma, dx, bc, L0);
+            std::vector<State> U1 = U;
+            for (size_t i=0;i<U.size();++i) U1[i] = U1[i] + fixed_dt * L0[i];
+            if (post_source) post_source(fixed_dt, t + fixed_dt, U1);
+
+            // Stage 2
+            std::vector<State> L1; flux_divergence(U1, gamma, dx, bc, L1);
+            std::vector<State> U2 = U1;
+            for (size_t i=0;i<U.size();++i) {
+                State tmp = U1[i] + fixed_dt * L1[i];
+                U2[i].rho  = 0.75 * U[i].rho  + 0.25 * tmp.rho;
+                U2[i].rhou = 0.75 * U[i].rhou + 0.25 * tmp.rhou;
+                U2[i].E    = 0.75 * U[i].E    + 0.25 * tmp.E;
+            }
+            if (post_source) post_source(fixed_dt, t + fixed_dt, U2);
+
+            // Stage 3
+            std::vector<State> L2; flux_divergence(U2, gamma, dx, bc, L2);
+            for (size_t i=0;i<U.size();++i) {
+                State tmp = U2[i] + fixed_dt * L2[i];
+                U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * tmp.rho;
+                U[i].rhou = (1.0/3.0) * U[i].rhou + (2.0/3.0) * tmp.rhou;
+                U[i].E    = (1.0/3.0) * U[i].E    + (2.0/3.0) * tmp.E;
+            }
+            if (post_source) post_source(fixed_dt, t + fixed_dt, U);
+        };
+
+        rk3_step_fixed_dt(dt);
+        t += dt;
+        ++step;
+
+        if (on_step) on_step(dt, t, U);
+    }
+}
+
 } // namespace ls

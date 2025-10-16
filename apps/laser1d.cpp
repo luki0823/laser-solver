@@ -10,47 +10,40 @@
 #include <iomanip>
 #include <sstream>
 
-int main(){
+int main() {
     using namespace ls;
-
-    // --- Parameters ---
-    const double gamma = 1.4;
-    const int    nx    = 200;
-    const double L     = 1.0;
-    const double CFL   = 0.3;
+    const double gamma = 1.6, L = 1.0, CFL = 0.45;   // CFL can be a bit larger with RK3
+    const int nx = 200, Nwrite = 50;
     const double t_end = 3.0e-3;
-    const BCKind bc    = BCKind::ReflectLeftCopy;
-    const int    Nwrite = 50;  // write interval (in steps)
+    const BCKind bc = BCKind::ReflectLeftCopy;
 
     Grid1D grid(nx, L);
 
-    // --- Initial condition ---
+    // IC (Sod-like)
     std::vector<State> U(nx);
-    for (int i = 0; i < nx; ++i) {
-        const bool left = (grid.x[i] < 0.5 * L);
-        const double rho = left ? 1.0   : 0.125;
-        const double u   = 0.0;
-        const double p   = left ? 1e5   : 1e4;
+    for (int i=0;i<nx;++i) {
+        bool left = grid.x[i] < 0.5*L;
+        double rho = left ? 1.0 : 0.125;
+        double u   = 0.0;
+        double p   = left ? 1e5 : 1e4;
         U[i] = prim_to_cons(rho, u, p, gamma);
     }
 
-    // --- Time loop ---
     double t = 0.0;
-    int step = 0;
-
-    while (t < t_end) {
-        double dt = step_euler(U, gamma, grid.dx, CFL, bc, t, nullptr);
-        t += dt;
-        ++step;
-
-        if (step % Nwrite == 0) {
+    int step_counter = 0;
+    auto on_step = [&](double dt, double tnow, const std::vector<State>& Ucur){
+        ++step_counter;
+        if (step_counter % Nwrite == 0) {
             std::ostringstream fname;
-            fname << "data/out/step_" << std::setw(4) << std::setfill('0') << step << ".csv";
-            write_csv(fname.str(), grid, U, gamma);
-            std::cout << "Wrote " << fname.str() << " at t=" << t << "\n";
+            fname << "data/out/step_" << std::setw(4) << std::setfill('0') << step_counter << ".csv";
+            write_csv(fname.str(), grid, Ucur, gamma);
+            std::cout << "RK3 wrote " << fname.str() << " at t=" << tnow << " (dt=" << dt << ")\n";
         }
-    }
+    };
 
-    std::cout << "Done. Final time t=" << t << ", steps=" << step << "\n";
+    // no source yet → pass nullptr
+    advance_ssprk3(U, t, t_end, gamma, grid.dx, CFL, bc, on_step, nullptr);
+
+    std::cout << "Done. Final t=" << t << "\n";
     return 0;
 }
