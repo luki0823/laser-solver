@@ -36,6 +36,7 @@
 #include "ls/eos.hpp"
 #include "ls/riemann.hpp"
 #include "ls/recon.hpp"
+#include "ls/bc.hpp"
 
 #include <vector>
 #include <algorithm>
@@ -81,14 +82,19 @@ inline void flux_divergence(const std::vector<State>& U,
                             double gamma,
                             double dx,
                             BCKind bc,
-                            std::vector<State>& dU)
+                            std::vector<State>& dU,
+                            Recon recon)
 {
     const int nx = static_cast<int>(U.size());
     dU.assign(nx, {0.0, 0.0, 0.0});
 
     // 1) First-order reconstruction -> interface states
     std::vector<State> UL, UR;
-    reconstruct_first(U, gamma, bc, UL, UR);
+    if (recon == Recon::WENO3)
+        reconstruct_weno3(U, gamma, bc, UL, UR);
+    else
+        reconstruct_first(U, gamma, bc, UL, UR);
+
 
     // 2) Numerical flux at interfaces (nx+1 faces)
     std::vector<State> F(nx + 1);
@@ -112,14 +118,17 @@ inline void flux_divergence(const std::vector<State>& U,
 //
 // Returns the dt it used (so the caller can accumulate time).
 // -----------------------------------------------------------------------------
-inline double step_euler(std::vector<State>& U,
-                         double gamma,
-                         double dx,
-                         double CFL,
-                         BCKind bc,
-                         double t,
-                         const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
-{
+
+
+
+//inline double step_euler(std::vector<State>& U,//
+//                         double gamma,
+//                         double dx,
+//                         double CFL,
+//                         BCKind bc,
+//                         double t,
+ //                        const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
+/*{
     // Compute stable dt from CFL:
     const double dt = cfl_dt(U, gamma, dx, CFL);
 
@@ -138,7 +147,10 @@ inline double step_euler(std::vector<State>& U,
     }
 
     return dt;
-}
+} 
+
+*/
+
 
 
 inline double rk3_step(std::vector<State>& U,
@@ -147,13 +159,14 @@ inline double rk3_step(std::vector<State>& U,
                        double dx,
                        double CFL,
                        BCKind bc,
+                       Recon recon,
                        const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
 {
     const double dt = cfl_dt(U,gamma,dx,CFL);
 
     // -- Stage 1 U1 = U^n + dt * L(U^n, t)
     std::vector<State> Ln; //L(Un)
-    flux_divergence(U, gamma, dx, bc, Ln);
+    flux_divergence(U, gamma, dx, bc, Ln, recon);
     std::vector<State> U1 = U;
     for (size_t i = 0; i < U.size(); ++i){
         U1[i] = U1[i] + dt * Ln[i];
@@ -162,7 +175,7 @@ inline double rk3_step(std::vector<State>& U,
 
     // Stage 2 3/4 U^n + 1/4 * (U1 + dt * L( U1, t+dt))
     std::vector<State> L1;
-    flux_divergence(U1, gamma, dx, bc, L1);
+    flux_divergence(U1, gamma, dx, bc, L1, recon);
     std::vector<State> U2 = U1;
 
     for (size_t i = 0; i<U.size(); ++i){
@@ -177,7 +190,7 @@ inline double rk3_step(std::vector<State>& U,
 
     // --- Stage 3: U^{n+1} = 1/3 U^n + 2/3 ( U2 + dt * L(U2, t+dt) )
     std::vector<State> L2;
-    flux_divergence(U2, gamma, dx, bc, L2);
+    flux_divergence(U2, gamma, dx, bc, L2, recon);
     for (size_t i = 0; i < U.size(); ++i) {
         State tmp = U2[i] + dt * L2[i];
         U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * tmp.rho;
@@ -189,60 +202,67 @@ inline double rk3_step(std::vector<State>& U,
     return dt; // caller advances time by this
 }
 
-inline void advance_ssprk3(std::vector<State>& U,
-                           double& t,
-                           double t_end,
-                           double gamma,
-                           double dx,
-                           double CFL,
-                           BCKind bc,
-                           const std::function<void(double /*dt*/, double /*t*/, const std::vector<State>& /*U*/)> &on_step = nullptr,
-                           const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
+inline void advance_ssprk3(std::vector<State>& U, double& t, double t_end,
+                           double gamma, double dx, double CFL,
+                           BCKind bc, Recon recon,
+                           auto&& on_step, auto&& post_source)
 {
+    using namespace ls;
+    const int nx_total = (int)U.size();
+    const int nx_phys  = nx_total - 2*NG;   // real cells only
+
+    std::vector<State> L(nx_total), U1(nx_total), U2(nx_total);
+
     int step = 0;
-    while (t < t_end) {
-        // compute a dt from current state, but clamp so we don't overshoot t_end
-        double dt_try = cfl_dt(U, gamma, dx, CFL);
-        double dt = std::min(dt_try, t_end - t);
+    while (t < t_end)
+    {
+        //--------------------------------------------------
+        // 1️⃣ Fill ghosts before any flux/divergence call
+        //--------------------------------------------------
+        fill_ghosts(U, bc);
 
-        // perform one RK3 step with *this* dt:
-        // to reuse rk3_step (which computes its own dt), we temporarily set CFL
-        // so that cfl_dt returns exactly dt. Easiest is to call a local lambda.
-        auto rk3_step_fixed_dt = [&](double fixed_dt) {
-            // Stage 1
-            std::vector<State> L0; flux_divergence(U,  gamma, dx, bc, L0);
-            std::vector<State> U1 = U;
-            for (size_t i=0;i<U.size();++i) U1[i] = U1[i] + fixed_dt * L0[i];
-            if (post_source) post_source(fixed_dt, t + fixed_dt, U1);
+        // CFL based on physical cells
+        double dt = cfl_dt(U, gamma, dx, CFL);
+        if (t + dt > t_end) dt = t_end - t;
 
-            // Stage 2
-            std::vector<State> L1; flux_divergence(U1, gamma, dx, bc, L1);
-            std::vector<State> U2 = U1;
-            for (size_t i=0;i<U.size();++i) {
-                State tmp = U1[i] + fixed_dt * L1[i];
-                U2[i].rho  = 0.75 * U[i].rho  + 0.25 * tmp.rho;
-                U2[i].rhou = 0.75 * U[i].rhou + 0.25 * tmp.rhou;
-                U2[i].E    = 0.75 * U[i].E    + 0.25 * tmp.E;
-            }
-            if (post_source) post_source(fixed_dt, t + fixed_dt, U2);
+        //--------------------------------------------------
+        // 2️⃣ Stage 1
+        //--------------------------------------------------
+        flux_divergence(U, gamma, dx, bc, L, recon);
+        for (int i = NG; i < NG + nx_phys; ++i)
+            U1[i] = U[i] + dt * L[i];
 
-            // Stage 3
-            std::vector<State> L2; flux_divergence(U2, gamma, dx, bc, L2);
-            for (size_t i=0;i<U.size();++i) {
-                State tmp = U2[i] + fixed_dt * L2[i];
-                U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * tmp.rho;
-                U[i].rhou = (1.0/3.0) * U[i].rhou + (2.0/3.0) * tmp.rhou;
-                U[i].E    = (1.0/3.0) * U[i].E    + (2.0/3.0) * tmp.E;
-            }
-            if (post_source) post_source(fixed_dt, t + fixed_dt, U);
-        };
+        fill_ghosts(U1, bc);
+        if (post_source) post_source(t, dt, U1);
 
-        rk3_step_fixed_dt(dt);
+        //--------------------------------------------------
+        // 3️⃣ Stage 2
+        //--------------------------------------------------
+        flux_divergence(U1, gamma, dx, bc, L, recon);
+        for (int i = NG; i < NG + nx_phys; ++i)
+            U2[i] = 0.75*U[i] + 0.25*(U1[i] + dt*L[i]);
+
+        fill_ghosts(U2, bc);
+        if (post_source) post_source(t + 0.5*dt, dt, U2);
+
+        //--------------------------------------------------
+        // 4️⃣ Stage 3
+        //--------------------------------------------------
+        flux_divergence(U2, gamma, dx, bc, L, recon);
+        for (int i = NG; i < NG + nx_phys; ++i)
+            U[i] = (1.0/3.0)*U[i] + (2.0/3.0)*(U2[i] + dt*L[i]);
+
+        fill_ghosts(U, bc);
+        if (post_source) post_source(t + dt, dt, U);
+
+        //--------------------------------------------------
+        // 5️⃣ Advance time and call callback
+        //--------------------------------------------------
         t += dt;
         ++step;
-
-        if (on_step) on_step(dt, t, U);
+        on_step(dt, t, U);
     }
 }
+
 
 } // namespace ls

@@ -69,6 +69,10 @@ int main(int argc, char** argv)
     const double CFL   = toml::find_or(cfg, "CFL",   0.45);
     const double t_end = toml::find_or(cfg, "t_end", 3.0e-3);
     const double gamma = toml::find_or(cfg, "gamma", 1.4);
+    std::string recon_str = toml::find_or(cfg, "reconstruction", std::string("FirstOrder"));
+    Recon recon = Recon::FirstOrder;
+    if (recon_str == "WENO3") recon = Recon::WENO3;
+
 
     std::string bc_str = toml::find_or(cfg, "bc", std::string("ReflectLeftCopy"));
     BCKind bc = BCKind::CopyEnds;
@@ -135,7 +139,7 @@ int main(int argc, char** argv)
     };
 
     // Advance solution to t_end using SSP-RK3
-    advance_ssprk3(U, t, t_end, gamma, grid.dx, CFL, bc, on_step, post_source);
+    advance_ssprk3(U, t, t_end, gamma, grid.dx, CFL, bc, recon, on_step, post_source);
 
     // Final write (ensure you always have the last frame)
     {

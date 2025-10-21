@@ -105,7 +105,7 @@ namespace ls{
     //----------------------------------------------------------
     inline void cons_to_prim(const State& U, double gamma,
                             double& rho, double& u, double& p) {
-        rho = U.rho;                // extract density
+        rho = std::max(U.rho,1e-12);                // extract density
         u   = U.rhou / rho;         // velocity = momentum / density
         p   = (gamma - 1.0) *       // ideal gas relation
             (U.E - 0.5 * rho * u * u);

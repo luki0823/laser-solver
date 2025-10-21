@@ -14,6 +14,8 @@
 #pragma once
 namespace ls {
 
+constexpr int NG =2;
+
 // Conservative state: U = [rho, rho*u, E]
 struct State { double rho, rhou, E; };
 

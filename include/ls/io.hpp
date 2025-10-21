@@ -16,27 +16,43 @@
 #include <fstream>
 #include <iomanip>
 #include <filesystem>
+#include <iostream>
+
 
 namespace ls {
 
-inline void write_csv(const std::string& filename,
+inline void write_csv(const std::string& fname,
                       const Grid1D& grid,
                       const std::vector<State>& U,
                       double gamma)
 {
-    std::filesystem::create_directories("../data/out");
+    using namespace ls;
+    const int nx_phys = grid.nx;
+    const int NG = ls::NG;
 
-    std::ofstream file(filename);
-    file << "x,rho,u,p,E\n";
-    file << std::scientific << std::setprecision(6);
-
-    for (size_t i = 0; i < U.size(); ++i) {
-        const double rho = U[i].rho;
-        const double u   = U[i].rhou / std::max(rho, 1e-14);
-        const double p   = (gamma - 1.0) * (U[i].E - 0.5 * rho * u * u);
-        file << grid.x[i] << "," << rho << "," << u << "," << p << "," << U[i].E << "\n";
+    std::ofstream f(fname);
+    if (!f.is_open()) {
+        std::cerr << "Error: could not open " << fname << " for writing.\n";
+        return;
     }
-    file.close();
+
+    f << "x,rho,u,p,E\n";
+    f << std::scientific << std::setprecision(8);
+
+    // loop only over physical cells, skipping ghosts
+    for (int i = 0; i < nx_phys; ++i)
+    {
+        int j = i + NG;  // map physical -> full array index
+
+        double rho = std::max(U[j].rho, 1e-12);
+        double u   = U[j].rhou / rho;
+        double E   = U[j].E;
+        double p   = std::max((gamma - 1.0)*(E - 0.5*rho*u*u), 1e-12);
+
+        f << grid.x[i] << "," << rho << "," << u << "," << p << "," << E << "\n";
+    }
+
+    f.close();
 }
 
 } // namespace ls

@@ -43,8 +43,15 @@ namespace ls {
 // -------------------------------
 enum class BCKind {
   CopyEnds,           // ext[0] = U[0], ext[nx+1] = U[nx-1]
-  ReflectLeftCopy     // reflective wall at left, copy at right
+  ReflectLeftCopy,    // reflective wall at left, copy at right
+  Periodic
 };
+
+enum class Recon {
+  FirstOrder,
+  WENO3
+};
+
 
 // -----------------------------------------------------------------------------
 // Helper: build a LEFT reflective ghost from the first interior state.
@@ -125,5 +132,103 @@ inline void reconstruct_first(const std::vector<State>& U,
         UR[i] = ext[i + 1];   // right state at interface i+1/2
     }
 }
+
+
+// -----------------------------------------------------------------------------
+// WENO3 reconstruction (component-wise)
+// Produces left/right interface values UL, UR from cell-centered U
+// Reference: Shu (1997), Jiang & Shu (1996)
+// -----------------------------------------------------------------------------
+inline void reconstruct_weno3(const std::vector<State>& U,
+                              double /*gamma*/,
+                              BCKind /*bc*/,
+                              std::vector<State>& UL,
+                              std::vector<State>& UR)
+{
+    const int nx = (int)U.size();
+    UL.assign(nx+1, State{});  // interfaces j = 0..nx
+    UR.assign(nx+1, State{});
+
+    const double eps = 1e-6;
+
+    // Helper: WENO3 for a scalar q on cell centers -> interface arrays qL, qR
+    auto weno3_scalar = [&](const std::vector<double>& q, std::vector<double>& qL, std::vector<double>& qR)
+    {
+        const int n = (int)q.size();
+        qL.assign(n+1, 0.0);   // j = 0..n
+        qR.assign(n+1, 0.0);
+
+        // Left state at interface j = i+1/2, computed from cell i stencil (i-1, i, i+1)
+        // This fills j = 2..(n-1)
+        for (int i = 1; i <= n-2; ++i) {
+            double q0 = 1.5*q[i] - 0.5*q[i-1];
+            double q1 = 0.5*q[i] + 0.5*q[i+1];
+            double b0 = (q[i]   - q[i-1])*(q[i]   - q[i-1]);
+            double b1 = (q[i+1] - q[i])  *(q[i+1] - q[i]);
+            double a0 = (1.0/3.0) / ((eps + b0)*(eps + b0));
+            double a1 = (2.0/3.0) / ((eps + b1)*(eps + b1));
+            double w0 = a0 / (a0 + a1);
+            double w1 = a1 / (a0 + a1);
+            qL[i+1] = w0*q0 + w1*q1;   // fills j = i+1
+        }
+
+        // Right state at interface j = i+1/2, computed from cell (i+1) stencil mirrored
+        // Here we fill j = 1..(n-2)
+        for (int i = 1; i <= n-2; ++i) {
+            // mirrored two linear candidates around i
+            double q0 = 0.5*q[i] + 0.5*q[i-1];
+            double q1 = 1.5*q[i] - 0.5*q[i+1];
+            double b0 = (q[i]   - q[i-1])*(q[i]   - q[i-1]);
+            double b1 = (q[i+1] - q[i])  *(q[i+1] - q[i]);
+            // mirror linear weights: (2/3, 1/3)
+            double a0 = (2.0/3.0) / ((eps + b0)*(eps + b0));
+            double a1 = (1.0/3.0) / ((eps + b1)*(eps + b1));
+            double w0 = a0 / (a0 + a1);
+            double w1 = a1 / (a0 + a1);
+            qR[i] = w0*q0 + w1*q1;     // fills j = i
+        }
+
+        // Endpoints and missing near-boundary interfaces:
+        qL[0] = q[0];                 // interface j=0 (left boundary)
+        qR[0] = q[0];
+
+        // Fallback 2nd-order one-sided for the first interior interface j=1
+        // Left state at j=1 should come from cell 0 (can’t build full WENO3)
+        qL[1] = 0.5*(q[0] + q[1]);
+
+        // Fallback for the last interior interface j=n-1 (right state)
+        qR[n-1] = 0.5*(q[n-1] + q[n-2]);
+
+        qL[n] = q[n-1];               // interface j=n (right boundary)
+        qR[n] = q[n-1];
+    };
+
+    // Extract component arrays (rho, u, E) with robust u
+    std::vector<double> rho(nx), u(nx), E(nx);
+    for (int i = 0; i < nx; ++i) {
+        double rh = std::max(U[i].rho, 1e-12); // avoid division by tiny
+        rho[i] = rh;
+        u[i]   = U[i].rhou / rh;
+        E[i]   = U[i].E;
+    }
+
+    // Reconstruct each scalar
+    std::vector<double> rhoL, rhoR, uL, uR, EL, ER;
+    weno3_scalar(rho, rhoL, rhoR);
+    weno3_scalar(u,   uL,   uR);
+    weno3_scalar(E,   EL,   ER);
+
+    // Pack back into conservative states at interfaces j=0..nx
+    for (int j = 0; j <= nx; ++j) {
+        UL[j].rho  = rhoL[j];
+        UL[j].rhou = rhoL[j] * uL[j];
+        UL[j].E    = EL[j];
+
+        UR[j].rho  = rhoR[j];
+        UR[j].rhou = rhoR[j] * uR[j];
+        UR[j].E    = ER[j];
+    }
+}
+
 
 } // namespace ls
