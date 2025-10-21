@@ -18,6 +18,8 @@ Makefile
 
 #data files
 data/out/
+/config
+
 
 # IDE settings
 .vscode/

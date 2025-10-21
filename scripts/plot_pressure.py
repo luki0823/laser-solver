@@ -72,7 +72,7 @@ def update(i):
 # ------------------------------------------------------------
 # 6. Run animation
 # ------------------------------------------------------------
-ani = FuncAnimation(fig, update, frames=timesteps, interval=100, blit=True)
+ani = FuncAnimation(fig, update, frames=timesteps, interval=1000, blit=True)
 
 # Uncomment to save animation as MP4 (requires ffmpeg)
 # ani.save("shocktube.mp4", writer="ffmpeg", fps=15)

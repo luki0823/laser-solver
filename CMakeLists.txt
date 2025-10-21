@@ -1,30 +1,61 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.15)
 project(laser_solver LANGUAGES CXX)
 
-# --- compiler settings ---
+# -----------------------------
+# 🔧 Compiler setup
+# -----------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# optional: add warnings for safer dev builds
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic -O2)
+# Set a nice output directory for binaries
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Include headers
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+# -----------------------------
+# 📦 External dependency: toml11 (header-only)
+# -----------------------------
+set(TOML_HEADER "${CMAKE_SOURCE_DIR}/include/ls/external/toml.hpp")
+
+if(NOT EXISTS ${TOML_HEADER})
+    message(STATUS "Fetching toml11 header...")
+    file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/include/ls/external)
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/ToruNiina/toml11/main/toml.hpp"
+        ${TOML_HEADER}
+        SHOW_PROGRESS
+    )
 endif()
 
-# --- source layout ---
-# your includes are in include/ls/
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+# -----------------------------
+# 🧩 Library target (header-only for now)
+# -----------------------------
+add_library(ls INTERFACE)
+target_include_directories(ls INTERFACE include)
 
-# --- executables ---
-# you can add more apps later (like shocktube, weno_test, etc.)
-add_executable(laser1d apps/laser1d.cpp)
+# -----------------------------
+# 🚀 Applications
+# -----------------------------
+# Each app is a standalone executable that links against the 'ls' interface lib.
 
-# link directories and include paths (useful for future libraries)
-target_include_directories(laser1d PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+#add_executable(laser1d apps/laser1d.cpp)
+#target_link_libraries(laser1d PRIVATE ls)
 
-# optional output path organization
-set_target_properties(laser1d PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
+add_executable(shocktube apps/shocktube.cpp)
+target_link_libraries(shocktube PRIVATE ls)
 
+
+# (future)
+# add_executable(shocktube1d apps/shocktube1d.cpp)
+# target_link_libraries(shocktube1d PRIVATE ls)
+# add_executable(laser2d apps/laser2d.cpp)
+# target_link_libraries(laser2d PRIVATE ls)
+
+# -----------------------------
+# ✅ Status message
+# -----------------------------
 message(STATUS "✅ laser_solver build configured successfully")
+message(STATUS "   Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "   Compiler:   ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
