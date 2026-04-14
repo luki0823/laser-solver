@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Set a nice output directory for binaries
+# Output directory for binaries
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Include headers
@@ -33,25 +33,45 @@ endif()
 # 🧩 Library target (header-only for now)
 # -----------------------------
 add_library(ls INTERFACE)
-target_include_directories(ls INTERFACE include)
+target_include_directories(ls INTERFACE ${CMAKE_SOURCE_DIR}/include)
+
+# -----------------------------
+# 🧵 OpenMP (shared-memory parallelism)
+# -----------------------------
+find_package(OpenMP)
 
 # -----------------------------
 # 🚀 Applications
 # -----------------------------
-# Each app is a standalone executable that links against the 'ls' interface lib.
+# add_executable(laser1d apps/laser1d.cpp)
+# target_link_libraries(laser1d PRIVATE ls)
 
-#add_executable(laser1d apps/laser1d.cpp)
-#target_link_libraries(laser1d PRIVATE ls)
+# add_executable(shocktube apps/shocktube.cpp)
+# target_link_libraries(shocktube PRIVATE ls)
 
-add_executable(shocktube apps/shocktube.cpp)
-target_link_libraries(shocktube PRIVATE ls)
+# add_executable(shocktube2d apps/shocktube2d.cpp)
+# target_link_libraries(shocktube2d PRIVATE ls)
 
+add_executable(laser2d apps/laser2d.cpp)
+target_link_libraries(laser2d PRIVATE ls)
 
-# (future)
-# add_executable(shocktube1d apps/shocktube1d.cpp)
-# target_link_libraries(shocktube1d PRIVATE ls)
-# add_executable(laser2d apps/laser2d.cpp)
-# target_link_libraries(laser2d PRIVATE ls)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(laser2d PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(laser2d PRIVATE LS_USE_OPENMP=1)
+    message(STATUS "✅ OpenMP enabled for laser2d")
+else()
+    message(STATUS "ℹ️ OpenMP not found; building single-threaded")
+endif()
+
+# Add below laser2d target
+add_executable(convergence2d apps/convergence2d.cpp)
+target_link_libraries(convergence2d PRIVATE ls)
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(convergence2d PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(convergence2d PRIVATE LS_USE_OPENMP=1)
+endif()
+
 
 # -----------------------------
 # ✅ Status message

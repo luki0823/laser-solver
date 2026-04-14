@@ -1,0 +1,62 @@
+# ===========================
+# 2D Laser/Plume Numerics Test
+# ===========================
+
+nx = 512
+ny = 512
+
+Lx = 5e-3
+Ly = 5e-3
+
+CFL   = 0.2
+t_end = 1e-6
+gamma = 1.66
+
+# dt collapse diagnostics
+enable_dt_diagnostics = false
+
+reconstruction = "WENO5"
+
+out_folder   = "runs/2026-03-26_21-37-44_512x512_omp12/WENO5_512x512_omp12/data"
+out_interval = 100
+
+# Thesis diagnostics
+enable_thesis_diagnostics = true
+diag_interval = 10
+shock_probe_y = -1.0
+shock_smooth_frac = 0.05
+
+laser_mode = "initial_plume"
+
+rho_cfl_floor = 1e-12
+dt_warn       = 1e-12
+
+[bc]
+left   = "Symmetry"
+right  = "Outflow"
+bottom = "Wall"
+top    = "Outflow"
+
+[initial_condition]
+rho0 = 1.6015
+u0   = 0.0
+v0   = 0.0
+p0   = 0.1e6
+
+[plume_ic]
+shape     = "oval_crater"
+x0        = 6.0e-6
+y0        = 6.0e-6
+rx        = 2.5e-4
+ry        = 2.5e-4
+p_plume   = 0.98e6
+rho_plume = 0.1883
+
+[laser]
+A  = 5e12
+x0 = 1.5e-3
+y0 = 1.5e-3
+wx = 3.0e-4
+wy = 3.0e-4
+t0 = 5e-8
+wt = 1e-9

@@ -1,0 +1,36 @@
+# =========================
+# 1-D Shock Tube Test Case
+# =========================
+
+# --- Simulation parameters ---
+nx     = 200
+L      = 1.0
+CFL    = 0.3
+t_end  = 0.003
+gamma  = 1.66
+
+# Reconstruction scheme: "FirstOrder" or "WENO3"
+reconstruction = "WENO3"
+
+# --- Boundary conditions ---
+# Valid options per side (from bc.hpp / parse_bc_type):
+#   "Wall"     -> reflecting wall (rhou flips sign, rho and E copied)
+#   "Symmetry" -> same as Wall for 1D, but semantically symmetry plane
+#   "Outflow"  -> zero-gradient / copy from interior (farfield-like)
+[bc]
+left  = "Wall"     # reflective left boundary (your old "ReflectLeftCopy" left side)
+right = "Outflow"  # outflow / copy on the right boundary
+
+# --- Initial condition ---
+[initial_condition]
+type    = "sod"
+rho_L   = 1.0
+p_L     = 100000.0
+rho_R   = 0.125
+p_R     = 1000.0
+x_split = 0.5
+
+# --- Output settings ---
+[output]
+interval = 50
+folder   = "data/out"

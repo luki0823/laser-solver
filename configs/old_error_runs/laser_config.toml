@@ -1,0 +1,21 @@
+# --- Simulation parameters ---
+nx     = 200
+L      = 1.0
+CFL    = 0.45
+t_end  = 0.003
+gamma  = 1.4
+bc     = "ReflectLeftCopy"
+
+# --- Initial condition ---
+[initial_condition]
+type    = "sod"
+rho_L   = 1.0
+p_L     = 100000.0
+rho_R   = 0.125
+p_R     = 10000.0
+x_split = 0.5
+
+# --- Output settings ---
+[output]
+interval = 50
+folder   = "data/out"

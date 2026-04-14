@@ -1,0 +1,45 @@
+# ============================================
+# 2-D Blast / Shock Tube Configuration File
+# ============================================
+
+# --- Simulation parameters ---
+nx     = 200
+ny     = 200
+Lx     = 1.0
+Ly     = 1.0
+CFL    = 0.4
+t_end  = 0.4
+gamma  = 1.66
+
+# Reconstruction scheme:
+#   "WENO3" or "FirstOrder"
+reconstruction = "WENO3"
+
+# --- Boundary Conditions ---
+# Valid BC types per bc.hpp:
+#   "Wall"     – reflecting wall
+#   "Outflow"  – copy / zero-gradient
+#   "Symmetry" – same as Wall in 2-D
+[bc]
+left   = "Wall"
+right  = "Wall"
+bottom = "Wall"
+top    = "Wall"
+
+# --- Initial Conditions ---
+# Circular high-pressure region centered at (cx, cy)
+# inside radius < R:      rho = rho1, p = p1
+# outside radius >= R:    rho = rho0, p = p0
+[initial_condition]
+rho0   = 1.0
+p0     = 1.0
+rho1   = 1.0
+p1     = 100.0
+cx     = 0.5
+cy     = 0.5
+radius = 0.1
+
+# --- Output settings ---
+[output]
+interval = 10
+folder   = "data/out2d"

@@ -1,0 +1,25 @@
+nx = 512
+ny = 512
+Lx = 1.0
+Ly = 1.0
+
+CFL   = 0.1
+t_end = 0.1
+gamma = 1.4
+
+reconstruction = "TENO5"
+
+rho0 = 1.0
+p0   = 1.0
+u0   = 1.0
+v0   = 0.5
+amp  = 0.2
+
+progress_interval = 100
+diag_interval = 100
+use_fixed_dt = true
+dt_abort = 1e-14
+
+
+results_csv = "convergence_results.csv"
+append = true

@@ -1,0 +1,27 @@
+nx = 64
+ny = 64
+Lx = 1.0
+Ly = 1.0
+CFL = 0.4
+t_end = 0.1
+gamma = 1.4
+reconstruction = "WENO3"   # or "FirstOrder"
+
+[bc]
+left   = "Outflow"
+right  = "Outflow"
+bottom = "Outflow"
+top    = "Outflow"
+
+[advection_ic]
+rho0 = 1.0
+amp  = 0.1
+p0   = 1.0
+u0   = 0.5
+v0   = 0.25
+kx   = 1.0
+ky   = 1.0
+
+[output]
+folder          = "data/error2d_64"
+write_final_csv = true

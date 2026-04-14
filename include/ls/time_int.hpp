@@ -1,268 +1,272 @@
 /*
 ==============================================================================
  File:        time_int.hpp
- Purpose:     Time integration utilities for 1D finite-volume Euler solver.
-
- Math background:
-   Semi-discrete finite volume (cell-average U_i):
-     dU_i/dt = -(F_{i+1/2} - F_{i-1/2}) / dx + S_i(t)
-
-   Here we implement the homogeneous part (no source yet):
-     dU_i/dt = -(F_{i+1/2} - F_{i-1/2}) / dx
-
-   Numerical interface flux uses Rusanov (Local Lax–Friedrichs):
-     F* = 0.5*(F_L + F_R) - 0.5*a_max*(U_R - U_L), 
-     a_max = max(|u_L| + c_L, |u_R| + c_R)
-
- Provided functions:
-   - cfl_dt():       compute dt from CFL condition
-   - flux_divergence(): assemble RHS (dU/dt) from interface fluxes
-   - step_euler():   single Forward–Euler step (with optional source hook)
-
- Design notes:
-   - Reconstruction is first-order (piecewise-constant) via reconstruct_first().
-     Interface states (UL, UR) come from a ghosted array respecting BCs.
-   - The API keeps a BC selector (BCKind) so you can swap BCs later without
-     changing the time integrator.
-   - step_euler() accepts an optional "post_source" lambda so you can add
-     laser heating later without rewriting the integrator.
-
- Future:
-   - Add SSP-RK3 with the same RHS + optional source pattern.
+ Purpose:     SSP RK3 time integration for 1D and 2D Euler
+ Author:      Lucas Pierce
 ==============================================================================
 */
 #pragma once
-#include "ls/types.hpp"
-#include "ls/eos.hpp"
-#include "ls/riemann.hpp"
-#include "ls/recon.hpp"
-#include "ls/bc.hpp"
 
 #include <vector>
-#include <algorithm>
-#include <functional>
 #include <cmath>
+#include <algorithm>
+
+#ifdef LS_USE_OPENMP
+  #include <omp.h>
+#endif
+
+#include "ls/types.hpp"
+#include "ls/bc.hpp"
+#include "ls/fv_update.hpp"
+#include "ls/mesh.hpp"
+#include "ls/eos.hpp"
 
 namespace ls {
 
-// -----------------------------------------------------------------------------
-// Compute dt from the CFL condition:
-//   dt = CFL * dx / max_i( |u_i| + c_i ),  where c = sqrt(gamma p / rho)
-// Guards with a small epsilon to avoid div-by-zero if the state is trivial.
-// -----------------------------------------------------------------------------
-inline double cfl_dt(const std::vector<State>& U, double gamma, double dx, double CFL)
+// ============================================================================
+// Enforce Positivity + Vacuum Safety
+//   - Floors rho and internal energy
+//   - Prevents huge velocities in near-vacuum by killing momentum
+// ============================================================================
+inline void enforce_positivity_2d(std::vector<ls::State2D>& U,
+                                 const ls::Mesh2D& mesh,
+                                 const ls::EOSIdealGas& eos)
 {
-    double amax = 0.0;
-    for (const auto& s : U) {
-        const double rho = std::max(s.rho, 1e-14);  // avoid blowups
-        const double u   = s.rhou / rho;
-        const double p   = (gamma - 1.0) * (s.E - 0.5 * rho * u * u);
-        const double c   = std::sqrt(std::max(0.0, gamma * p / rho));
-        amax = std::max(amax, std::fabs(u) + c);
-    }
-    return CFL * dx / std::max(amax, 1e-14);
-}
+    (void)eos;
 
-// -----------------------------------------------------------------------------
-// Build RHS = dU/dt from interface fluxes:
-//   dU_i/dt = -( F_{i+1/2} - F_{i-1/2} ) / dx
-//
-// Steps:
-//   1) Reconstruct interface states (UL, UR) using first-order + BCs
-//   2) Compute numerical flux at each interface with Rusanov
-//   3) Take conservative difference to form RHS per cell
-//
-// Arrays:
-//   U     : size nx         (cell averages)
-//   UL/UR : size nx+1       (interface states for i=0..nx)
-//   F     : size nx+1       (interface fluxes for i=0..nx)
-//   dU    : size nx         (cell RHS)
-// -----------------------------------------------------------------------------
-inline void flux_divergence(const std::vector<State>& U,
-                            double gamma,
-                            double dx,
-                            BCKind bc,
-                            std::vector<State>& dU,
-                            Recon recon)
-{
-    const int nx = static_cast<int>(U.size());
-    dU.assign(nx, {0.0, 0.0, 0.0});
-
-    // 1) First-order reconstruction -> interface states
-    std::vector<State> UL, UR;
-    if (recon == Recon::WENO3)
-        reconstruct_weno3(U, gamma, bc, UL, UR);
-    else
-        reconstruct_first(U, gamma, bc, UL, UR);
+    const double rho_min = 1e-12;    // consistent with eos.hpp
+    const double e_min   = 1e-10;
 
 
-    // 2) Numerical flux at interfaces (nx+1 faces)
-    std::vector<State> F(nx + 1);
-    for (int i = 0; i <= nx; ++i) {
-        F[i] = rusanov_flux(UL[i], UR[i], gamma);
-    }
+    // NEW: treat anything below this as "numerical vacuum"
+    // Start with 1e-6 or 1e-5 for stability, then tighten later.
+    //const double rho_vac = 1e-6;
 
-    // 3) Conservative difference: -(F[i+1/2] - F[i-1/2]) / dx
-    for (int i = 0; i < nx; ++i) {
-        dU[i].rho  = -(F[i + 1].rho  - F[i].rho ) / dx;
-        dU[i].rhou = -(F[i + 1].rhou - F[i].rhou) / dx;
-        dU[i].E    = -(F[i + 1].E    - F[i].E   ) / dx;
-    }
-}
+    const double u_max = 2e20;
 
-// -----------------------------------------------------------------------------
-// Single Forward–Euler step:
-//   U^{n+1} = U^n + dt * RHS(U^n, t^n)
-// with optional post_source(dt, t+dt, Utemp) hook applied AFTER the Euler update
-// so you can add e.g., laser energy to the energy equation later.
-//
-// Returns the dt it used (so the caller can accumulate time).
-// -----------------------------------------------------------------------------
+    const int i0 = mesh.interior_i_start();
+    const int i1 = mesh.interior_i_end();
+    const int j0 = mesh.interior_j_start();
+    const int j1 = mesh.interior_j_end();
 
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for collapse(2) schedule(static)
+    #endif
+        for (int J = j0; J <= j1; ++J) {
+            for (int I = i0; I <= i1; ++I) {
+            // ---- inside the (I,J) loop ----
+            auto& Ui = U[mesh.index(I,J)];
 
+            // sanitize NaNs/Infs
+            if (!std::isfinite(Ui.rho))  Ui.rho  = rho_min;
+            if (!std::isfinite(Ui.rhou)) Ui.rhou = 0.0;
+            if (!std::isfinite(Ui.rhov)) Ui.rhov = 0.0;
+            if (!std::isfinite(Ui.E))    Ui.E    = e_min;
 
-//inline double step_euler(std::vector<State>& U,//
-//                         double gamma,
-//                         double dx,
-//                         double CFL,
-//                         BCKind bc,
-//                         double t,
- //                        const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
-/*{
-    // Compute stable dt from CFL:
-    const double dt = cfl_dt(U, gamma, dx, CFL);
+            // density floor
+            if (Ui.rho < rho_min) {
+            const double rho_old = Ui.rho;
+            const double u_old = (std::isfinite(rho_old) && std::fabs(rho_old) > 0.0) ? (Ui.rhou / rho_old) : 0.0;
+            const double v_old = (std::isfinite(rho_old) && std::fabs(rho_old) > 0.0) ? (Ui.rhov / rho_old) : 0.0;
 
-    // Build RHS from flux divergence:
-    std::vector<State> dU;
-    flux_divergence(U, gamma, dx, bc, dU);
+            Ui.rho  = rho_min;
+            Ui.rhou = rho_min * u_old;
+            Ui.rhov = rho_min * v_old;
+            }
 
-    // Forward–Euler update:
-    for (size_t i = 0; i < U.size(); ++i) {
-        U[i] = U[i] + dt * dU[i];
-    }
+            // velocities
+            double u = Ui.rhou / Ui.rho;
+            double v = Ui.rhov / Ui.rho;
 
-    // Optional source term applied after Euler step (explicit, unsplit simple form)
-    if (post_source) {
-        post_source(dt, t + dt, U);
-    }
+            // speed cap (avoid "vacuum -> infinite u")
+            const double u_max = 2e20; // tune if needed
+            double speed = std::sqrt(u*u + v*v);
+            if (!std::isfinite(speed) || speed > u_max) {
+                const double s = u_max / (speed + 1e-300);
+                u *= s; v *= s;
+                Ui.rhou = Ui.rho * u;
+                Ui.rhov = Ui.rho * v;
+            }
 
-    return dt;
-} 
-
-*/
-
-
-
-inline double rk3_step(std::vector<State>& U,
-                       double t,
-                       double gamma,
-                       double dx,
-                       double CFL,
-                       BCKind bc,
-                       Recon recon,
-                       const std::function<void(double /*dt*/, double /*tnext*/, std::vector<State>& /*U*/)> &post_source = nullptr)
-{
-    const double dt = cfl_dt(U,gamma,dx,CFL);
-
-    // -- Stage 1 U1 = U^n + dt * L(U^n, t)
-    std::vector<State> Ln; //L(Un)
-    flux_divergence(U, gamma, dx, bc, Ln, recon);
-    std::vector<State> U1 = U;
-    for (size_t i = 0; i < U.size(); ++i){
-        U1[i] = U1[i] + dt * Ln[i];
-    }
-    if (post_source) post_source(dt, t+dt, U1);
-
-    // Stage 2 3/4 U^n + 1/4 * (U1 + dt * L( U1, t+dt))
-    std::vector<State> L1;
-    flux_divergence(U1, gamma, dx, bc, L1, recon);
-    std::vector<State> U2 = U1;
-
-    for (size_t i = 0; i<U.size(); ++i){
-        State tmp = U1[i] + dt*L1[i];
-        //convex combination
-        U2[i].rho  = 0.75 * U[i].rho  + 0.25 * tmp.rho;
-        U2[i].rhou = 0.75 * U[i].rhou + 0.25 * tmp.rhou;
-        U2[i].E    = 0.75 * U[i].E    + 0.25 * tmp.E;
-
-    }
-    if (post_source) post_source(dt, t + dt, U2);
-
-    // --- Stage 3: U^{n+1} = 1/3 U^n + 2/3 ( U2 + dt * L(U2, t+dt) )
-    std::vector<State> L2;
-    flux_divergence(U2, gamma, dx, bc, L2, recon);
-    for (size_t i = 0; i < U.size(); ++i) {
-        State tmp = U2[i] + dt * L2[i];
-        U[i].rho  = (1.0/3.0) * U[i].rho  + (2.0/3.0) * tmp.rho;
-        U[i].rhou = (1.0/3.0) * U[i].rhou + (2.0/3.0) * tmp.rhou;
-        U[i].E    = (1.0/3.0) * U[i].E    + (2.0/3.0) * tmp.E;
-    }
-    if (post_source) post_source(dt, t + dt, U);
-
-    return dt; // caller advances time by this
-}
-
-inline void advance_ssprk3(std::vector<State>& U, double& t, double t_end,
-                           double gamma, double dx, double CFL,
-                           BCKind bc, Recon recon,
-                           auto&& on_step, auto&& post_source)
-{
-    using namespace ls;
-    const int nx_total = (int)U.size();
-    const int nx_phys  = nx_total - 2*NG;   // real cells only
-
-    std::vector<State> L(nx_total), U1(nx_total), U2(nx_total);
-
-    int step = 0;
-    while (t < t_end)
-    {
-        //--------------------------------------------------
-        // 1️⃣ Fill ghosts before any flux/divergence call
-        //--------------------------------------------------
-        fill_ghosts(U, bc);
-
-        // CFL based on physical cells
-        double dt = cfl_dt(U, gamma, dx, CFL);
-        if (t + dt > t_end) dt = t_end - t;
-
-        //--------------------------------------------------
-        // 2️⃣ Stage 1
-        //--------------------------------------------------
-        flux_divergence(U, gamma, dx, bc, L, recon);
-        for (int i = NG; i < NG + nx_phys; ++i)
-            U1[i] = U[i] + dt * L[i];
-
-        fill_ghosts(U1, bc);
-        if (post_source) post_source(t, dt, U1);
-
-        //--------------------------------------------------
-        // 3️⃣ Stage 2
-        //--------------------------------------------------
-        flux_divergence(U1, gamma, dx, bc, L, recon);
-        for (int i = NG; i < NG + nx_phys; ++i)
-            U2[i] = 0.75*U[i] + 0.25*(U1[i] + dt*L[i]);
-
-        fill_ghosts(U2, bc);
-        if (post_source) post_source(t + 0.5*dt, dt, U2);
-
-        //--------------------------------------------------
-        // 4️⃣ Stage 3
-        //--------------------------------------------------
-        flux_divergence(U2, gamma, dx, bc, L, recon);
-        for (int i = NG; i < NG + nx_phys; ++i)
-            U[i] = (1.0/3.0)*U[i] + (2.0/3.0)*(U2[i] + dt*L[i]);
-
-        fill_ghosts(U, bc);
-        if (post_source) post_source(t + dt, dt, U);
-
-        //--------------------------------------------------
-        // 5️⃣ Advance time and call callback
-        //--------------------------------------------------
-        t += dt;
-        ++step;
-        on_step(dt, t, U);
+            // positivity of internal energy
+            const double kinetic = 0.5 * Ui.rho * (u*u + v*v);
+            double e_int = Ui.E - kinetic;
+            if (!std::isfinite(e_int) || e_int < e_min) {
+                Ui.E = kinetic + e_min;
+            }
+        }
     }
 }
 
+
+// ============================================================================
+// 1D RK3 integrator
+// ============================================================================
+inline void advance_rk3_1d(
+    std::vector<State1D>& U,
+    std::vector<State1D>& rhs,
+    const Mesh1D& mesh,
+    const EOSIdealGas& eos,
+    const Bc1D& bc,
+    ReconType recon_type,
+    double dt)
+{
+    std::vector<State1D> U0 = U;
+    std::vector<State1D> U1 = U;
+    std::vector<State1D> U2 = U;
+
+    // Stage 1
+    apply_bc_1d(U0, mesh, bc);
+    compute_rhs_1d(U0, rhs, mesh, eos, recon_type);
+
+    for (int I = 0; I < mesh.nx_tot; ++I)
+        U1[I] = U0[I] + rhs[I] * dt;
+
+    // Stage 2
+    apply_bc_1d(U1, mesh, bc);
+    compute_rhs_1d(U1, rhs, mesh, eos, recon_type);
+
+    for (int I = 0; I < mesh.nx_tot; ++I)
+        U2[I] = 0.75 * U0[I] + 0.25 * (U1[I] + rhs[I] * dt);
+
+    // Stage 3
+    apply_bc_1d(U2, mesh, bc);
+    compute_rhs_1d(U2, rhs, mesh, eos, recon_type);
+
+    for (int I = 0; I < mesh.nx_tot; ++I)
+        U[I] = (1.0/3.0) * U0[I] + (2.0/3.0) * (U2[I] + rhs[I] * dt);
+
+    apply_bc_1d(U, mesh, bc);
+}
+
+// ============================================================================
+// 2D RK3 integrator
+// ============================================================================
+inline void advance_rk3_2d(
+    std::vector<State2D>& U,
+    std::vector<State2D>& rhs,
+    const Mesh2D& mesh,
+    const EOSIdealGas& eos,
+    const Bc2D& bc,
+    ReconType recon_type,
+    double dt)
+{
+    std::vector<State2D> U0 = U;
+    std::vector<State2D> U1 = U;
+    std::vector<State2D> U2 = U;
+
+    // ------------------------------------------------------------
+    // Stage 1
+    // ------------------------------------------------------------
+    apply_bc_2d(U0, mesh, bc);
+    compute_rhs_2d(U0, rhs, mesh, eos, recon_type);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int k = 0; k < (int)U.size(); ++k)
+        U1[k] = U0[k] + rhs[k] * dt;
+
+    enforce_positivity_2d(U1, mesh, eos);
+
+    // ------------------------------------------------------------
+    // Stage 2
+    // ------------------------------------------------------------
+    apply_bc_2d(U1, mesh, bc);
+    compute_rhs_2d(U1, rhs, mesh, eos, recon_type);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int k = 0; k < (int)U.size(); ++k)
+        U2[k] = 0.75 * U0[k] + 0.25 * (U1[k] + rhs[k] * dt);
+
+    enforce_positivity_2d(U2, mesh, eos);
+
+    // ------------------------------------------------------------
+    // Stage 3
+    // ------------------------------------------------------------
+    apply_bc_2d(U2, mesh, bc);
+    compute_rhs_2d(U2, rhs, mesh, eos, recon_type);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int k = 0; k < (int)U.size(); ++k)
+        U[k] = (1.0/3.0) * U0[k] + (2.0/3.0) * (U2[k] + rhs[k] * dt);
+
+    apply_bc_2d(U, mesh, bc);
+    enforce_positivity_2d(U, mesh, eos);
+
+}
+
+// ============================================================================
+// 2D SSP RK3 with source term S(x,y,t) on energy equation
+// ============================================================================
+template <typename Source>
+inline void advance_rk3_2d_with_source(
+    std::vector<State2D>& U,
+    std::vector<State2D>& rhs,
+    const Mesh2D& mesh,
+    const EOSIdealGas& eos,
+    const Bc2D& bc,
+    ReconType recon_type,
+    const Source& S,
+    double t_n,
+    double dt)
+{
+    const int N = mesh.nx_tot * mesh.ny_tot;
+
+    std::vector<State2D> U0 = U;
+    std::vector<State2D> U1(N);
+    std::vector<State2D> U2(N);
+
+    // Stage 1
+    apply_bc_2d(U, mesh, bc);
+    compute_rhs_2d_with_source(U, rhs, mesh, eos, recon_type, S, t_n, dt);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int i = 0; i < N; ++i) {
+        U1[i] = U0[i] + rhs[i] * dt;
+    }
+
+    enforce_positivity_2d(U1, mesh, eos);
+
+    // Stage 2
+    apply_bc_2d(U1, mesh, bc);
+    compute_rhs_2d_with_source(U1, rhs, mesh, eos, recon_type, S, t_n + dt,dt);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int i = 0; i < N; ++i) {
+        U2[i] = State2D{
+            .rho  = 0.75 * U0[i].rho  + 0.25 * (U1[i].rho  + rhs[i].rho  * dt),
+            .rhou = 0.75 * U0[i].rhou + 0.25 * (U1[i].rhou + rhs[i].rhou * dt),
+            .rhov = 0.75 * U0[i].rhov + 0.25 * (U1[i].rhov + rhs[i].rhov * dt),
+            .E    = 0.75 * U0[i].E    + 0.25 * (U1[i].E    + rhs[i].E    * dt)
+        };
+    }
+
+    enforce_positivity_2d(U2, mesh, eos);
+
+    // Stage 3
+    apply_bc_2d(U2, mesh, bc);
+    compute_rhs_2d_with_source(U2, rhs, mesh, eos, recon_type, S, t_n + 0.5 * dt,dt);
+
+    #ifdef LS_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (int i = 0; i < N; ++i) {
+        U[i].rho  = (1.0/3.0) * U0[i].rho  + (2.0/3.0) * (U2[i].rho  + rhs[i].rho  * dt);
+        U[i].rhou = (1.0/3.0) * U0[i].rhou + (2.0/3.0) * (U2[i].rhou + rhs[i].rhou * dt);
+        U[i].rhov = (1.0/3.0) * U0[i].rhov + (2.0/3.0) * (U2[i].rhov + rhs[i].rhov * dt);
+        U[i].E    = (1.0/3.0) * U0[i].E    + (2.0/3.0) * (U2[i].E    + rhs[i].E    * dt);
+    }
+
+    enforce_positivity_2d(U, mesh, eos);
+}
 
 } // namespace ls

@@ -1,114 +1,166 @@
 /*
 ==============================================================================
  File:        eos.hpp
- Purpose:     Defines thermodynamic relations for an ideal gas EOS.
+ Purpose:     Equation of state utilities for Euler solvers (1D + 2D)
+ Author:      Lucas Pierce
  Description:
-   Provides functions to compute pressure, sound speed, and conversions
-   between primitive (rho, u, p) and conservative (rho, rho*u, E) variables.
-
- Dependencies:
-   - types.hpp  (for struct State)
-   - <cmath>
-
- Example:
-   double p = ls::pressure(U, gamma);
-   double c = ls::sound_speed(U, gamma);
+   - Ideal gas EOS with ratio of specific heats gamma
+   - Conservative <-> primitive conversions for:
+       * 1D: State1D  (rho, rhou, E)  <-> (rho, u, p)
+       * 2D: State2D  (rho, rhou, rhov, E) <-> (rho, u, v, p)
+   - Pressure and sound speed helpers that work on States directly
 ==============================================================================
-
 */
 
-#pragma once
-#include "types.hpp" //include types for U
-#include <cmath> //math funcs
 
+#pragma once
+#include <cmath>
+#include "ls/types.hpp"
 
 
 namespace ls{
 
-    //----------------------------------------------------------
-    // IdealGas struct
-    //   Encapsulates an equation of state (EOS) for an ideal gas.
-    //   Provides functions to compute pressure and sound speed
-    //   from the conservative state.
-    //----------------------------------------------------------
-    struct IdealGas {
-        double gamma;   // ratio of specific heats, usually 1.4 for air
+  
+// -----------------------------------------------------------------------------
+// Primitive variable structs (handy for debugging / clarity)
+// -----------------------------------------------------------------------------
+struct Prim1D {
+    double rho;  // density
+    double u;    // velocity in x
+    double p;    // pressure
+};
 
-        // Constructor: initialize gamma (default = 1.4 if not provided).
-        // "explicit" avoids unintentional implicit conversions.
-        explicit IdealGas(double g = 1.4) : gamma(g) {}
+struct Prim2D {
+    double rho;  // density
+    double u;    // velocity in x
+    double v;    // velocity in y
+    double p;    // pressure
+};  
 
-        //------------------------------------------------------
-        // Compute pressure from conservative state U
-        //
-        // Formula: p = (gamma - 1) * (E - 0.5 * rho * u^2)
-        //
-        // where:
-        //   u = velocity = (rho*u)/rho
-        //   E = total energy density
-        //------------------------------------------------------
-        inline double pressure(const State& U) const {
-            double u = U.rhou / U.rho; // velocity = momentum / density
-            return (gamma - 1.0) * (U.E - 0.5 * U.rho * u * u);
-        }
 
-        //------------------------------------------------------
-        // Compute speed of sound from conservative state U
-        //
-        // Formula: c = sqrt(gamma * p / rho)
-        //
-        // where p is obtained from the pressure function above.
-        //------------------------------------------------------
-        inline double sound_speed(const State& U) const {
-            double p = pressure(U);           // compute thermodynamic pressure
-            return std::sqrt(gamma * p / U.rho);
-        }
-    };
+// -----------------------------------------------------------------------------
+// Ideal-gas EOS
+// -----------------------------------------------------------------------------
+struct EOSIdealGas {
+    double gamma{1.4};
 
-    //----------------------------------------------------------
-    // Convert primitive variables (rho, u, p) into conservative
-    // variables (rho, rhou, E).
-    //
-    // Input:
-    //   rho   = density
-    //   u     = velocity
-    //   p     = pressure
-    //   gamma = ratio of specific heats
-    //
-    // Output: returns a State struct {rho, rhou, E}
-    //
-    // Formula for total energy density:
-    //   E = p / (gamma - 1) + 0.5 * rho * u^2
-    //----------------------------------------------------------
-    inline State prim_to_cons(double rho, double u, double p, double gamma) {
-        return {
-            rho,                          // density
-            rho * u,                      // momentum = rho * u
-            p / (gamma - 1.0) + 0.5 * rho * u * u  // total energy density
-        };
+    // -----------------------------
+    // 1D: conservative -> primitive
+    // -----------------------------
+    inline Prim1D cons_to_prim(const State1D& U) const {
+        const double rho_min = 1e-8;
+        const double e_min   = 1e-10;
+
+        Prim1D W;
+        W.rho = U.rho;
+        if (W.rho < rho_min) W.rho = rho_min;
+
+        W.u   = U.rhou / W.rho;
+
+        const double kinetic = 0.5 * W.rho * W.u * W.u;
+        double e_int   = U.E - kinetic;
+        if (e_int < e_min) e_int = e_min;
+
+        W.p = (gamma - 1.0) * e_int;
+        return W;
     }
 
-    //----------------------------------------------------------
-    // Convert conservative variables back to primitives.
-    //
-    // Input:
-    //   U     = State {rho, rhou, E}
-    //   gamma = ratio of specific heats
-    //
-    // Output (passed by reference):
-    //   rho = density
-    //   u   = velocity
-    //   p   = pressure
-    //
-    // This function modifies the variables rho, u, p directly.
-    // That's why return type is void.
-    //----------------------------------------------------------
-    inline void cons_to_prim(const State& U, double gamma,
-                            double& rho, double& u, double& p) {
-        rho = std::max(U.rho,1e-12);                // extract density
-        u   = U.rhou / rho;         // velocity = momentum / density
-        p   = (gamma - 1.0) *       // ideal gas relation
-            (U.E - 0.5 * rho * u * u);
-    }   
+    inline void cons_to_prim(const State1D& U,
+                             double& rho, double& u, double& p) const
+    {
+        Prim1D W = cons_to_prim(U);
+        rho = W.rho;
+        u   = W.u;
+        p   = W.p;
+    }
+
+    // 1D: primitive -> conservative
+    inline State1D prim_to_cons(const Prim1D& W) const {
+        const double kinetic = 0.5 * W.rho * W.u * W.u;
+        const double e_int   = W.p / (gamma - 1.0);
+        State1D U;
+        U.rho  = W.rho;
+        U.rhou = W.rho * W.u;
+        U.E    = e_int + kinetic;
+        return U;
+    }
+
+    inline State1D prim_to_cons(double rho, double u, double p) const {
+        Prim1D W{rho, u, p};
+        return prim_to_cons(W);
+    }
+
+    // -----------------------------
+    // 2D: conservative -> primitive
+    // -----------------------------
+    inline Prim2D cons_to_prim(const State2D& U) const {
+        const double rho_min = 1e-8;
+        const double e_min   = 1e-10;
+
+        Prim2D W;
+        W.rho = U.rho;
+        if (W.rho < rho_min) W.rho = rho_min;
+
+        W.u   = U.rhou / W.rho;
+        W.v   = U.rhov / W.rho;
+
+        const double kinetic = 0.5 * W.rho * (W.u*W.u + W.v*W.v);
+        double e_int   = U.E - kinetic;
+        if (e_int < e_min) e_int = e_min;
+
+        W.p = (gamma - 1.0) * e_int;
+        return W;
+    }
+
+    inline void cons_to_prim(const State2D& U,
+                             double& rho, double& u, double& v, double& p) const
+    {
+        Prim2D W = cons_to_prim(U);
+        rho = W.rho;
+        u   = W.u;
+        v   = W.v;
+        p   = W.p;
+    }
+
+    // 2D: primitive -> conservative
+    inline State2D prim_to_cons(const Prim2D& W) const {
+        const double kinetic = 0.5 * W.rho * (W.u*W.u + W.v*W.v);
+        const double e_int   = W.p / (gamma - 1.0);
+        State2D U;
+        U.rho  = W.rho;
+        U.rhou = W.rho * W.u;
+        U.rhov = W.rho * W.v;
+        U.E    = e_int + kinetic;
+        return U;
+    }
+
+    inline State2D prim_to_cons(double rho, double u, double v, double p) const {
+        Prim2D W{rho, u, v, p};
+        return prim_to_cons(W);
+    }
+
+    // -----------------------------
+    // Pressure & sound speed
+    // -----------------------------
+    inline double pressure(const State1D& U) const {
+        Prim1D W = cons_to_prim(U);
+        return W.p;
+    }
+
+    inline double pressure(const State2D& U) const {
+        Prim2D W = cons_to_prim(U);
+        return W.p;
+    }
+
+    inline double sound_speed(const State1D& U) const {
+        Prim1D W = cons_to_prim(U);
+        return std::sqrt(gamma * W.p / W.rho);
+    }
+
+    inline double sound_speed(const State2D& U) const {
+        Prim2D W = cons_to_prim(U);
+        return std::sqrt(gamma * W.p / W.rho);
+    }
+};
 
 }

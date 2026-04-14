@@ -4,6 +4,13 @@
 /CMakeCache.txt
 /data/
 /out
+/MP4_Runs/
+/Figures/
+/src/
+/tests/
+/256_diag/
+/512_diag/
+/runs/
 cmake_install.cmake
 Makefile
 
@@ -11,6 +18,9 @@ Makefile
 *.exe
 *.out
 *.app
+*.mp4
+
+
 
 # Python cache
 /__pycache__/
@@ -18,8 +28,6 @@ Makefile
 
 #data files
 data/out/
-/config
-
 
 # IDE settings
 .vscode/
